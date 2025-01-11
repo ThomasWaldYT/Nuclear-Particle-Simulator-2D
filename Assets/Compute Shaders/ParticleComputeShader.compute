@@ -1,0 +1,123 @@
+#pragma kernel CSMain
+
+// Input buffers
+StructuredBuffer<float3> positions;
+StructuredBuffer<float3> velocities;
+StructuredBuffer<float> masses;
+StructuredBuffer<float> charges;
+StructuredBuffer<int> types;
+StructuredBuffer<int> activeParticleIndices;
+
+// Output buffers
+RWStructuredBuffer<float3> outVelocities;
+RWStructuredBuffer<float> debug;
+
+// Parameters
+int startingParticleCount;
+int activeParticleCount;
+float deltaTime;
+float coulombConstant;
+float gravityConstant;
+float strongForceConstant;
+float strongForceInnerRadius;
+float strongForceOuterRadius;
+float universalRadius;
+
+// Particle types
+#define PARTICLE_TYPE_ELECTRON 0
+#define PARTICLE_TYPE_PROTON 1
+#define PARTICLE_TYPE_NEUTRON 2
+#define PARTICLE_TYPE_PHOTON 3
+
+[numthreads(256, 1, 1)]
+void CSMain(uint id : SV_DispatchThreadID)
+{
+    int index = (int) id;
+
+    if (index >= startingParticleCount)
+        return;
+
+    int currentType = types[index];
+
+    // Initialize outVelocities with current velocities
+    outVelocities[index] = velocities[index];
+
+    // Skip force calculations for photons
+    if (currentType == PARTICLE_TYPE_PHOTON)
+    {
+        return;
+    }
+
+    float3 currentPosition = positions[index];
+    float3 currentVelocity = velocities[index];
+
+    float currentMass = masses[index];
+    float currentCharge = charges[index];
+
+    float3 netForce = float3(0, 0, 0);
+
+    for (int idx = 0; idx < activeParticleCount; idx++)
+    {
+        int j = activeParticleIndices[idx];
+        if (index == j)
+            continue;
+
+        float3 otherPosition = positions[j];
+        float otherMass = masses[j];
+        float otherCharge = charges[j];
+        int otherType = types[j];
+
+        float3 direction = otherPosition - currentPosition;
+        float distanceSquared = dot(direction, direction);
+        float distance = sqrt(distanceSquared);
+        if (distance < 1e-6)
+            continue;
+
+        direction = direction / distance; // Normalize direction
+
+        // Electrostatic force
+        float3 electrostaticDirection = direction;
+        if (currentType == PARTICLE_TYPE_ELECTRON && otherType == PARTICLE_TYPE_PROTON)
+        {
+            if (distance < 10)
+            {
+                electrostaticDirection *= -1;
+                electrostaticDirection += cross(electrostaticDirection, float3(0, 0, 1)) * 1;
+            }
+            else electrostaticDirection += cross(electrostaticDirection, float3(0, 0, -1)) * 1;
+        }
+        
+        float electrostaticForce = -(coulombConstant * currentCharge * otherCharge) / distanceSquared;
+        netForce += electrostaticForce * electrostaticDirection;
+
+        // Gravitational force
+        float gravitationalForce = (gravityConstant * currentMass * otherMass) / distanceSquared;
+        netForce += gravitationalForce * direction;
+
+        // Strong force between protons and neutrons only
+        bool isCurrentNucleon = (currentType == PARTICLE_TYPE_PROTON || currentType == PARTICLE_TYPE_NEUTRON);
+        bool isOtherNucleon = (otherType == PARTICLE_TYPE_PROTON || otherType == PARTICLE_TYPE_NEUTRON);
+
+        if (isCurrentNucleon && isOtherNucleon)
+        {
+            if (distance < strongForceOuterRadius)
+            {
+                float strongForce = strongForceConstant / (distance * distance * distance);
+
+                if (distance < strongForceInnerRadius)
+                {
+                    // Repulsive inside inner radius
+                    netForce -= strongForce * direction;
+                }
+                else
+                {
+                    // Attractive inside outer radius
+                    netForce += strongForce * direction;
+                }
+            }
+        }
+    }
+    
+    float3 acceleration = netForce / currentMass;
+    outVelocities[index] = currentVelocity + acceleration * deltaTime;
+}
